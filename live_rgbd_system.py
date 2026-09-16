@@ -214,7 +214,8 @@ def main():
                 if face_box is not None:
                     geometry = classify_face(depth, face_box, scale, intr, landmarks, geometry_config)
                     face_valid_ratio = geometry.get("valid_ratio")
-                    feature_status = "成功" if geometry["success"] else "失败"
+                    feature_status = ("有效" if geometry.get("quality_ok") else
+                                      ("已计算，质量不足" if geometry["success"] else "不足"))
                     live_text = geometry["state"]
                     debug_reason = geometry["reason"]
             if landmarks is not None:

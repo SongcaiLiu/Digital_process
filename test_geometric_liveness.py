@@ -21,3 +21,15 @@ rng=np.random.default_rng(7)
 r=run(.8+rng.normal(0,.012,(h,w)))
 assert r["state"]=="UNKNOWN",r
 print("PASS: front/tilted/diagonal planes, curved face, missing and noisy depth")
+
+# One cheek occluded: sufficient global coverage and remaining cheek still work.
+occluded=z.copy(); occluded[65:96,130:160]=0
+assert run(occluded)["state"]=="LIVE", run(occluded)
+# Large missing areas and near-range objects must not be labelled photo.
+holes=np.full((h,w),.8); holes[:,20:130]=0
+assert run(holes)["state"]=="UNKNOWN"
+assert run(np.full((h,w),.25))["state"]=="UNKNOWN"
+# Missing nose on a perfect plane cannot turn it into a live face.
+plane=np.full((h,w),.8);plane[70:91,90:111]=0
+assert run(plane)["state"]=="PHOTO",run(plane)
+print("PASS: single-cheek visibility, coverage/range gates and flat surface with nose holes")

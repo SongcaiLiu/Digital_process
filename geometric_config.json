@@ -11,5 +11,8 @@
   "live_spatial_mm": 3.0,
   "nose_min_mm": 5.0,
   "nose_max_mm": 55.0,
-  "max_noise_mm": 4.0
+  "max_noise_mm": 4.0,
+  "min_cells": 24,
+  "curve_gain_min": 0.35,
+  "curve_spread_max_mm": 70.0
 }
