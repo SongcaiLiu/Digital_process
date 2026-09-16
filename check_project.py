@@ -41,7 +41,7 @@ def main():
     print(f"  {mediapipe_status():7} 人脸关键点/动作")
     for module, (name, capability) in optional.items():
         print(f"  {import_status(module, capability):7} {name}")
-    for path in (Path("processed/real_features.csv"), Path("models/liveness_oneclass.json")):
+    for path in (Path("geometric_config.json"), Path("models/face_landmarker.task"), Path("yolo11n.pt")):
         print(f"  {'OK' if path.is_file() else 'MISSING':7} {path}")
 
 

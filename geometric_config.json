@@ -1,0 +1,15 @@
+{
+  "min_valid_ratio": 0.6,
+  "min_points": 350,
+  "min_face_width": 70,
+  "near_m": 0.4,
+  "far_m": 1.5,
+  "plane_tolerance_mm": 3.0,
+  "flat_spread_mm": 6.0,
+  "flat_support": 0.85,
+  "live_spread_mm": 10.0,
+  "live_spatial_mm": 3.0,
+  "nose_min_mm": 5.0,
+  "nose_max_mm": 55.0,
+  "max_noise_mm": 4.0
+}

@@ -13,10 +13,11 @@ import pyrealsense2 as rs
 from PIL import Image, ImageDraw, ImageFont
 
 from rgbd_project_core import (
-    FaceLocator, OneClassModel, PersonLocator, depth_preview,
-    extract_depth_features, measure_person_3d,
+    FaceLocator, PersonLocator, depth_preview, measure_person_3d,
 )
 
+
+from geometric_liveness import classify_face, load_config
 
 LEFT_EYE = (33, 160, 158, 133, 153, 144)
 RIGHT_EYE = (362, 385, 387, 263, 373, 380)
@@ -152,7 +153,7 @@ def build_dashboard(color, depth_color, values):
         (f"RGB-D深度特征：{values['feature_status']}", (20, 112), (220,220,220), 19, False),
         (f"分类结果：{values['live_cn']}", (20, 148), live_color, 31, True),
         (f"人体三维：{values['person3d_cn']}    距离：{values['distance']}", (20, 196), (220,220,220), 19, False),
-        (f"模型距离：{values['raw_score']}    阈值：{values['threshold']}", (20, 229), (210,210,210), 18, False),
+        (values["geometry_summary"], (20, 229), (210,210,210), 18, False),
         (f"眨眼次数：{values['blinks']}", (mid+20, 45), (80,255,170), 27, True),
         (f"低头次数：{values['head_down_count']}    抬头次数：{values['head_up_count']}", (mid+20, 84), (80,255,170), 25, True),
         (f"当前动作：眼睛={values['eyes_cn']}  头部={values['head_cn']}", (mid+20, 126), (230,230,230), 19, False),
@@ -164,7 +165,7 @@ def build_dashboard(color, depth_color, values):
 
 def main():
     p = argparse.ArgumentParser(description="D455 RGB-D初版实时系统")
-    p.add_argument("--model", type=Path, default=Path("models/liveness_oneclass.json"))
+    p.add_argument("--geometry-config", type=Path, default=Path("geometric_config.json"))
     p.add_argument("--person-model", default="yolo11n.pt")
     p.add_argument("--width", type=int, default=640); p.add_argument("--height", type=int, default=480)
     p.add_argument("--fps", type=int, default=30)
@@ -174,7 +175,7 @@ def main():
     p.add_argument("--allow-fallback", action="store_true", help="缺少YOLO/MediaPipe时仍以降级模式运行")
     p.add_argument("--snapshots", type=Path, default=Path("demo_results"))
     args = p.parse_args()
-    model = OneClassModel.load(args.model)
+    geometry_config = load_config(args.geometry_config)
     person = PersonLocator(args.person_model)
     face = FaceLocator(allow_fallback=args.allow_fallback)
     if not args.allow_fallback and (person.backend == "full-frame-fallback" or not face.backend.startswith("mediapipe")):
@@ -184,7 +185,6 @@ def main():
         raise SystemExit("完整演示所需组件不可用：" + "、".join(missing) +
                          "\n请执行 python -m pip install -r project_requirements.txt；仅调试降级模式可加 --allow-fallback")
     action = ActionState(args.head_down_direction)
-    decisions = deque(maxlen=7)
     pipeline = rs.pipeline(); config = rs.config()
     config.enable_stream(rs.stream.depth, args.width, args.height, rs.format.z16, args.fps)
     config.enable_stream(rs.stream.color, args.width, args.height, rs.format.bgr8, args.fps)
@@ -203,7 +203,7 @@ def main():
             color = np.asanyarray(cf.get_data()).copy(); depth = np.asanyarray(df.get_data()).copy()
             person_box, confidence, _ = person.locate(color, depth)
             person_3d = {"state": "UNKNOWN"}
-            live_text = "UNKNOWN"; ratio = None; raw_distance = None
+            live_text = "UNKNOWN"; geometry = {}
             face_valid_ratio = None; debug_reason = "未检测到人体"
             feature_status = "未运行"
             face_box = None; landmarks = None; face_source = "not-found"
@@ -212,31 +212,11 @@ def main():
                 debug_reason = "未检测到人脸"
                 face_box, landmarks, face_source = face.locate(color, person_box)
                 if face_box is not None:
-                    features, quality = extract_depth_features(depth, face_box, scale, intr)
-                    face_valid_ratio = quality.get("valid_ratio")
-                    feature_status = "成功" if features is not None and quality.get("valid_ratio", 0) >= .20 else "失败"
-                    reason_map = {
-                        "empty_roi": "人脸裁剪区域为空",
-                        "too_few_depth_points": "人脸有效深度点不足",
-                        "too_few_foreground_points": "人脸前景深度点不足",
-                        "invalid_features": "人脸三维特征计算失败",
-                    }
-                    debug_reason = reason_map.get(quality.get("reason"), "人脸深度证据不足")
-                    if features is not None and quality["valid_ratio"] >= .20:
-                        raw_distance = float(model.distances(features)[0]); ratio = raw_distance/model.threshold
-                        frame_live = raw_distance <= model.threshold
-                        decisions.append(frame_live)
-                        live_text = "LIVE" if sum(decisions) >= max(1, len(decisions)*.6) else "PHOTO"
-                        debug_reason = "真人模型接受当前人脸" if frame_live else "真人模型距离超过阈值"
-                        if person.backend != "full-frame-fallback" and person_3d["state"] == "FLAT":
-                            live_text = "PHOTO"
-                            debug_reason = "人体区域点云接近平面"
-                    else:
-                        decisions.clear()
-                else:
-                    decisions.clear()
-            else:
-                decisions.clear()
+                    geometry = classify_face(depth, face_box, scale, intr, landmarks, geometry_config)
+                    face_valid_ratio = geometry.get("valid_ratio")
+                    feature_status = "成功" if geometry["success"] else "失败"
+                    live_text = geometry["state"]
+                    debug_reason = geometry["reason"]
             if landmarks is not None:
                 head, eyes, pitch, ear = action.update(
                     landmarks, intr, args.head_down_threshold, args.head_up_threshold)
@@ -264,8 +244,9 @@ def main():
                 "distance": distance_text, "blinks": action.blink_count,
                 "head_down_count": action.head_down_count, "head_up_count": action.head_up_count,
                 "eyes_cn": eyes_cn, "head_cn": head_cn,
-                "raw_score": "--" if raw_distance is None else f"{raw_distance:.2f}",
-                "threshold": f"{model.threshold:.2f}",
+                "geometry_summary": ("去倾斜起伏：%.1f mm｜平面比例：%.0f%%" %
+                    (geometry["spread_mm"], geometry["support"]*100)) if geometry.get("success") else "去倾斜起伏：--",
+
                 "depth_valid": "--" if face_valid_ratio is None else f"{face_valid_ratio:.1%}",
                 "reason": debug_reason, "hint": hint,
             })
@@ -273,7 +254,7 @@ def main():
             key=cv2.waitKey(1)&0xff
             if key in (ord('q'),ord('Q'),27): break
             if key in (ord('c'),ord('C')):
-                action=ActionState(args.head_down_direction); decisions.clear()
+                action=ActionState(args.head_down_direction)
             if key in (ord('r'),ord('R')):
                 action.reset_counts()
             if key in (ord('s'),ord('S')):

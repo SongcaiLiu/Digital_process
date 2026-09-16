@@ -1,31 +1,12 @@
-"""Core utilities for the initial RGB-D person/liveness project.
-
-The liveness model deliberately uses only real samples.  It models the normal
-distribution of normalized 3-D face-shape features and treats large deviations
-as unknown/non-live candidates.
-"""
-
+"""Shared pretrained detectors and RGB-D display utilities."""
 from __future__ import annotations
 
-import json
 import math
 import os
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import cv2
 import numpy as np
-
-
-FEATURE_NAMES = [
-    "valid_ratio", "foreground_ratio", "z_std", "z_mad", "z_p05",
-    "z_p25", "z_p75", "z_p95", "plane_rmse", "plane_p90",
-    "quad_rmse", "curvature_gain", "center_minus_all", "upper_minus_all",
-    "lower_minus_all", "left_minus_all", "right_minus_all",
-    "grid_00", "grid_01", "grid_02", "grid_10", "grid_11", "grid_12",
-    "grid_20", "grid_21", "grid_22",
-]
 
 
 def clamp_box(box: tuple[int, int, int, int], shape: tuple[int, ...]) -> tuple[int, int, int, int]:
@@ -164,91 +145,6 @@ class PersonLocator:
         return box, conf, self.backend
 
 
-def _region_median(z: np.ndarray, mask: np.ndarray, ys: slice, xs: slice, default: float) -> float:
-    values = z[ys, xs][mask[ys, xs]]
-    return float(np.median(values)) if values.size >= 8 else default
-
-
-def extract_depth_features(
-    depth_raw: np.ndarray,
-    box: tuple[int, int, int, int],
-    depth_scale: float,
-    intrinsics: dict,
-) -> tuple[np.ndarray | None, dict]:
-    """Extract pose/scale-resistant surface features from an aligned depth ROI."""
-    x1, y1, x2, y2 = clamp_box(box, depth_raw.shape)
-    raw = depth_raw[y1:y2, x1:x2]
-    if raw.size == 0:
-        return None, {"reason": "empty_roi"}
-    z = raw.astype(np.float32) * float(depth_scale)
-    valid0 = (z > .20) & (z < 3.5)
-    valid_ratio = float(valid0.mean())
-    if np.count_nonzero(valid0) < 150:
-        return None, {"reason": "too_few_depth_points", "valid_ratio": valid_ratio}
-
-    median_z = float(np.median(z[valid0]))
-    # Keep the face surface and suppress background visible around the crop.
-    valid = valid0 & (np.abs(z - median_z) < .18)
-    if np.count_nonzero(valid) < 120:
-        return None, {"reason": "too_few_foreground_points", "valid_ratio": valid_ratio}
-    foreground_ratio = float(valid.mean())
-    zz = z[valid]
-    robust_scale = max(float(np.percentile(zz, 95) - np.percentile(zz, 5)), .01)
-    rel = (zz - np.median(zz)) / robust_scale
-
-    yy, xx = np.indices(z.shape, dtype=np.float32)
-    u = xx[valid] + x1
-    v = yy[valid] + y1
-    fx, fy = float(intrinsics["fx"]), float(intrinsics["fy"])
-    ppx, ppy = float(intrinsics["ppx"]), float(intrinsics["ppy"])
-    X = (u - ppx) / fx * zz
-    Y = (v - ppy) / fy * zz
-    step = max(1, len(zz) // 5000)
-    Xs, Ys, Zs = X[::step], Y[::step], zz[::step]
-    plane_a = np.column_stack((Xs, Ys, np.ones_like(Xs)))
-    plane_coef, *_ = np.linalg.lstsq(plane_a, Zs, rcond=None)
-    plane_res = Zs - plane_a @ plane_coef
-    q_a = np.column_stack((Xs, Ys, Xs*Xs, Xs*Ys, Ys*Ys, np.ones_like(Xs)))
-    q_coef, *_ = np.linalg.lstsq(q_a, Zs, rcond=None)
-    q_res = Zs - q_a @ q_coef
-    plane_rmse = float(np.sqrt(np.mean(plane_res**2)))
-    quad_rmse = float(np.sqrt(np.mean(q_res**2)))
-
-    norm_z = (z - median_z) / robust_scale
-    h, w = z.shape
-    med = 0.0
-    values = [
-        valid_ratio, foreground_ratio, float(np.std(rel)),
-        float(np.median(np.abs(rel-np.median(rel)))),
-        *[float(np.percentile(rel, p)) for p in (5, 25, 75, 95)],
-        plane_rmse / robust_scale,
-        float(np.percentile(np.abs(plane_res), 90)) / robust_scale,
-        quad_rmse / robust_scale,
-        max(0.0, (plane_rmse-quad_rmse)/max(plane_rmse, 1e-6)),
-        _region_median(norm_z, valid, slice(h//3, 2*h//3), slice(w//3, 2*w//3), med),
-        _region_median(norm_z, valid, slice(0, h//3), slice(0, w), med),
-        _region_median(norm_z, valid, slice(2*h//3, h), slice(0, w), med),
-        _region_median(norm_z, valid, slice(0, h), slice(0, w//3), med),
-        _region_median(norm_z, valid, slice(0, h), slice(2*w//3, w), med),
-    ]
-    for gy in range(3):
-        for gx in range(3):
-            values.append(_region_median(
-                norm_z, valid,
-                slice(gy*h//3, (gy+1)*h//3),
-                slice(gx*w//3, (gx+1)*w//3), med,
-            ))
-    features = np.asarray(values, dtype=np.float64)
-    if len(features) != len(FEATURE_NAMES) or not np.all(np.isfinite(features)):
-        return None, {"reason": "invalid_features"}
-    return features, {
-        "reason": "ok", "valid_ratio": valid_ratio,
-        "foreground_ratio": foreground_ratio, "median_depth_m": median_z,
-        "point_count": int(np.count_nonzero(valid)),
-        "plane_rmse_m": plane_rmse,
-    }
-
-
 def measure_person_3d(depth_raw: np.ndarray, box: tuple[int, int, int, int], depth_scale: float, intrinsics: dict) -> dict:
     """Measure a detected person's robust 3-D extent in camera coordinates."""
     x1, y1, x2, y2 = clamp_box(box, depth_raw.shape)
@@ -271,73 +167,6 @@ def measure_person_3d(depth_raw: np.ndarray, box: tuple[int, int, int, int], dep
     state = "3D_OK" if geometry_ok and thickness >= .035 else ("FLAT" if geometry_ok else "UNKNOWN")
     return {"state": state, "valid_ratio": valid_ratio, "distance_m": median,
             "width_m": width, "height_m": height, "thickness_m": thickness}
-
-
-@dataclass
-class OneClassModel:
-    median: np.ndarray
-    scale: np.ndarray
-    center: np.ndarray
-    inverse_covariance: np.ndarray
-    threshold: float
-    feature_names: list[str]
-    metadata: dict
-
-    def distances(self, values: np.ndarray) -> np.ndarray:
-        x = (np.atleast_2d(values) - self.median) / self.scale
-        delta = x - self.center
-        return np.einsum("ij,jk,ik->i", delta, self.inverse_covariance, delta)
-
-    def predict(self, values: np.ndarray) -> np.ndarray:
-        return self.distances(values) <= self.threshold
-
-    def save(self, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "model_type": "robust_gaussian_one_class",
-            "feature_names": self.feature_names,
-            "median": self.median.tolist(), "scale": self.scale.tolist(),
-            "center": self.center.tolist(),
-            "inverse_covariance": self.inverse_covariance.tolist(),
-            "threshold": self.threshold, "metadata": self.metadata,
-        }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    @classmethod
-    def load(cls, path: Path):
-        p = json.loads(path.read_text(encoding="utf-8"))
-        return cls(np.array(p["median"]), np.array(p["scale"]), np.array(p["center"]),
-                   np.array(p["inverse_covariance"]), float(p["threshold"]),
-                   list(p["feature_names"]), dict(p.get("metadata", {})))
-
-
-def fit_one_class(values: np.ndarray, threshold_quantile: float = .95, threshold_values: np.ndarray | None = None):
-    median = np.median(values, axis=0)
-    scale = 1.4826 * np.median(np.abs(values-median), axis=0)
-    std = np.std(values, axis=0)
-    scale = np.where(scale > 1e-6, scale, np.where(std > 1e-6, std, 1.0))
-    x = (values-median)/scale
-    center = np.median(x, axis=0)
-    cov = np.cov(x, rowvar=False)
-    if np.ndim(cov) == 0:
-        cov = np.eye(values.shape[1])
-    # Shrinkage makes inversion stable for a small, correlated prototype dataset.
-    diag = np.diag(np.diag(cov))
-    cov = .65*cov + .35*diag + np.eye(cov.shape[0])*1e-4
-    inv = np.linalg.pinv(cov)
-    model = OneClassModel(median, scale, center, inv, 0.0, FEATURE_NAMES, {})
-    calibration = values if threshold_values is None else threshold_values
-    scores = model.distances(calibration)
-    model.threshold = max(float(np.quantile(scores, threshold_quantile)), 1e-6)
-    return model
-
-
-def iter_sessions(root: Path, label: str = "real") -> Iterable[Path]:
-    base = root / label
-    if not base.exists():
-        return
-    for metadata in sorted(base.glob("*/*/metadata.json")):
-        yield metadata.parent
 
 
 def depth_preview(depth_raw: np.ndarray, scale: float, near=.3, far=2.0):
