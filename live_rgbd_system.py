@@ -102,7 +102,7 @@ def build_dashboard(color, depth_color, values):
         (f"MediaPipe人脸检测：{values['mp_status']}", (20, 80), (220,220,220), 19, False),
         (f"RGB-D深度特征：{values['feature_status']}", (20, 112), (220,220,220), 19, False),
         (f"分类结果：{values['live_cn']}", (20, 148), live_color, 31, True),
-        (f"人体三维：{values['person3d_cn']}    距离：{values['distance']}", (20, 196), (220,220,220), 19, False),
+        (f"人体三维：{values['person3d_cn']}    人脸距离：{values['face_distance']}", (20, 196), (220,220,220), 19, False),
         (values["geometry_summary"], (20, 229), (210,210,210), 18, False),
         (f"眨眼次数：{values['blinks']}", (mid+20, 45), (80,255,170), 27, True),
         (f"低头次数：{values['head_down_count']}    抬头次数：{values['head_up_count']}", (mid+20, 84), (80,255,170), 25, True),
@@ -192,7 +192,10 @@ def main():
                 "people": person.last_count, "yolo_status": yolo_status,
                 "mp_status": mp_status, "feature_status": feature_status,
                 "person3d_cn": person3d_cn, "live": live_text, "live_cn": live_cn,
-                "distance": distance_text, "blinks": action.blink_count,
+                "distance": distance_text,
+                "face_distance": ("%.2f m" % geometry["face_distance_m"])
+                    if geometry.get("face_distance_m") is not None else "--",
+                "blinks": action.blink_count,
                 "head_down_count": action.head_down_count, "head_up_count": action.head_up_count,
                 "eyes_cn": eyes_cn, "head_cn": head_cn,
                 "geometry_summary": ("去倾斜起伏：%.1f mm｜平面比例：%.0f%%" %

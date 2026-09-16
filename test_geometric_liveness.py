@@ -28,7 +28,7 @@ assert run(occluded)["state"]=="LIVE", run(occluded)
 # Large missing areas and near-range objects must not be labelled photo.
 holes=np.full((h,w),.8); holes[:,20:130]=0
 assert run(holes)["state"]=="UNKNOWN"
-assert run(np.full((h,w),.25))["state"]=="UNKNOWN"
+assert run(np.full((h,w),.15))["state"]=="UNKNOWN"
 # Missing nose on a perfect plane cannot turn it into a live face.
 plane=np.full((h,w),.8);plane[70:91,90:111]=0
 assert run(plane)["state"]=="PHOTO",run(plane)
@@ -44,3 +44,18 @@ partial_face=z.copy();partial_face[partial==0]=0
 r=run(partial_face)
 assert r["state"]=="UNKNOWN",r
 print("PASS: sparse distributed plane accepted, sparse curved face rejected")
+
+# Previously excluded nonzero planes now reach geometry; live range stays narrower.
+for distance in (.25,.35,1.7,2.5):
+    r=run(np.full((h,w),distance))
+    assert r["state"]=="PHOTO",r
+    assert abs(r["face_distance_m"]-distance)<.002,r
+for distance in (.15,3.5):
+    r=run(np.full((h,w),distance))
+    assert r["state"]=="UNKNOWN",r
+    assert r["too_near_ratio"]+r["too_far_ratio"]>.99,r
+for distance in (.3,2.):
+    curve=distance-.035*np.exp(-((x-100)**2/400+(y-80)**2/700))
+    r=run(curve)
+    assert r["state"]!="LIVE",r
+print("PASS: extended plane range, separate near/far diagnostics, unchanged live range")

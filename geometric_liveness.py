@@ -11,7 +11,7 @@ DEFAULTS = dict(min_valid_ratio=.60, min_points=350, min_face_width=70,
                 nose_min_mm=5., nose_max_mm=55., max_noise_mm=4.,
                 min_cells=24, curve_gain_min=.35, curve_spread_max_mm=70.,
                 photo_valid_ratio=.25, photo_min_points=250, photo_min_cells=20,
-                photo_min_span=.65)
+                photo_min_span=.65, photo_near_m=.20, photo_far_m=3.0)
 OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,
         379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,
         127,162,21,54,103,67,109]
@@ -24,6 +24,8 @@ def load_config(path=None):
         raise ValueError("几何配置存在未知字段")
     if any(not np.isfinite(v) or v <= 0 for v in config.values()):
         raise ValueError("几何阈值必须是有限正数")
+    if config["near_m"]>=config["far_m"] or config["photo_near_m"]>=config["photo_far_m"]:
+        raise ValueError("距离下限必须小于上限")
     return config
 
 def fit_plane(points):
@@ -48,16 +50,25 @@ def analyze_geometry(depth, scale, intr, mask, landmarks, config=None):
     if np.ptp(xx) < c["min_face_width"]:
         result["reason"]="人脸像素过少，请靠近"; return result
     z = depth[yy,xx].astype(float)*scale
-    valid = (z >= c["near_m"]) & (z <= c["far_m"])
+    nonzero=z>0
+    result["face_distance_m"]=float(np.median(z[nonzero])) if np.any(nonzero) else None
+    # Widen only the plane-evidence input range; preserve the live-face range.
+    valid = (z >= c["photo_near_m"]) & (z <= c["photo_far_m"])
+    live_valid = (z >= c["near_m"]) & (z <= c["far_m"])
     result["valid_ratio"]=float(valid.mean())
+    result["live_valid_ratio"]=float(live_valid.mean())
+    missing=float(np.mean(~nonzero))
+    too_near=float(np.mean(nonzero & (z<c["photo_near_m"])))
+    too_far=float(np.mean(z>c["photo_far_m"]))
+    result.update(missing_ratio=missing,too_near_ratio=too_near,too_far_ratio=too_far)
     low_quality_reason=None
-    if valid.mean() < c["min_valid_ratio"]:
-        missing=float(np.mean(z==0))
-        outside=float(np.mean((z>0)&~valid))
-        low_quality_reason=("有效深度%.0f%%<%.0f%%：空洞%.0f%%，超距%.0f%%" %
-                          (valid.mean()*100,c["min_valid_ratio"]*100,missing*100,outside*100))
-        if valid.mean()<c["photo_valid_ratio"]:
-            result["reason"]=low_quality_reason; return result
+    if live_valid.mean() < c["min_valid_ratio"]:
+        low_quality_reason="真人曲面有效深度%.0f%%，未达%.0f%%" % (
+            live_valid.mean()*100,c["min_valid_ratio"]*100)
+    if valid.mean()<c["photo_valid_ratio"]:
+        result["reason"]="平面深度不足：空洞%.0f%%，近距%.0f%%，远距%.0f%%" % (
+            missing*100,too_near*100,too_far*100)
+        return result
     if valid.sum() < c["photo_min_points"]:
         result["reason"]="有效深度点数不足"; return result
     x,y,z = xx[valid],yy[valid],z[valid]
