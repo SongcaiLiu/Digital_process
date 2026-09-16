@@ -14,5 +14,9 @@
   "max_noise_mm": 4.0,
   "min_cells": 24,
   "curve_gain_min": 0.35,
-  "curve_spread_max_mm": 70.0
+  "curve_spread_max_mm": 70.0,
+  "photo_valid_ratio": 0.25,
+  "photo_min_points": 250,
+  "photo_min_cells": 20,
+  "photo_min_span": 0.65
 }

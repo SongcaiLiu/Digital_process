@@ -9,7 +9,9 @@ DEFAULTS = dict(min_valid_ratio=.60, min_points=350, min_face_width=70,
                 flat_spread_mm=6., flat_support=.85,
                 live_spread_mm=10., live_spatial_mm=3.,
                 nose_min_mm=5., nose_max_mm=55., max_noise_mm=4.,
-                min_cells=24, curve_gain_min=.35, curve_spread_max_mm=70.)
+                min_cells=24, curve_gain_min=.35, curve_spread_max_mm=70.,
+                photo_valid_ratio=.25, photo_min_points=250, photo_min_cells=20,
+                photo_min_span=.65)
 OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,
         379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,
         127,162,21,54,103,67,109]
@@ -48,13 +50,15 @@ def analyze_geometry(depth, scale, intr, mask, landmarks, config=None):
     z = depth[yy,xx].astype(float)*scale
     valid = (z >= c["near_m"]) & (z <= c["far_m"])
     result["valid_ratio"]=float(valid.mean())
+    low_quality_reason=None
     if valid.mean() < c["min_valid_ratio"]:
         missing=float(np.mean(z==0))
         outside=float(np.mean((z>0)&~valid))
-        result["reason"]=("有效深度%.0f%%<%.0f%%：空洞%.0f%%，超距%.0f%%" %
+        low_quality_reason=("有效深度%.0f%%<%.0f%%：空洞%.0f%%，超距%.0f%%" %
                           (valid.mean()*100,c["min_valid_ratio"]*100,missing*100,outside*100))
-        return result
-    if valid.sum() < c["min_points"]:
+        if valid.mean()<c["photo_valid_ratio"]:
+            result["reason"]=low_quality_reason; return result
+    if valid.sum() < c["photo_min_points"]:
         result["reason"]="有效深度点数不足"; return result
     x,y,z = xx[valid],yy[valid],z[valid]
     # Reject disconnected/background depths without filling missing pixels.
@@ -69,8 +73,8 @@ def analyze_geometry(depth, scale, intr, mask, landmarks, config=None):
     spread=float(np.percentile(residual,95)-np.percentile(residual,5))
     support=float(np.mean(np.abs(residual-np.median(residual)) <= c["plane_tolerance_mm"]))
     # Cell medians retain coherent surface shape; within-cell MAD measures noise.
-    gx=np.minimum(7,((x-x.min())/max(np.ptp(x)+1,1)*8).astype(int))
-    gy=np.minimum(7,((y-y.min())/max(np.ptp(y)+1,1)*8).astype(int))
+    gx=np.minimum(7,((x-xx.min())/max(np.ptp(xx)+1,1)*8).astype(int))
+    gy=np.minimum(7,((y-yy.min())/max(np.ptp(yy)+1,1)*8).astype(int))
     medians=[]; noises=[]; cell_xy=[]
     for cell in range(64):
         selected=gy*8+gx==cell
@@ -126,11 +130,28 @@ def analyze_geometry(depth, scale, intr, mask, landmarks, config=None):
     result["quality_ok"]=False
     if noise > c["max_noise_mm"]:
         result["reason"]="局部深度噪声%.1f毫米超限" % noise; return result
+    occupied=np.asarray(cell_xy,dtype=int)
+    span_ok=(np.ptp(x)/max(np.ptp(xx),1)>=c["photo_min_span"] and
+             np.ptp(y)/max(np.ptp(yy),1)>=c["photo_min_span"])
+    quadrant_ok=False
+    if len(occupied):
+        quadrants=(occupied[:,1]>=4)*2+(occupied[:,0]>=4)
+        quadrant_ok=all(np.sum(quadrants==q)>=2 for q in range(4))
+    photo_coverage=(len(medians)>=c["photo_min_cells"] and span_ok and quadrant_ok)
+    if (spread <= c["flat_spread_mm"] and support >= c["flat_support"]
+            and photo_coverage):
+        result.update(state="PHOTO",quality_ok=True,
+                      reason="分散有效深度一致支持平面（有效%.0f%%）" % (valid.mean()*100))
+        return result
+    if low_quality_reason is not None or len(x)<c["min_points"]:
+        result["reason"]=(low_quality_reason or "真人曲面有效点数不足")+"；平面证据不足"
+        return result
     if len(medians)<c["min_cells"]:
         result["reason"]="有效空间网格不足：%d/%d" % (len(medians),c["min_cells"]); return result
     result["quality_ok"]=True
-    if spread <= c["flat_spread_mm"] and support >= c["flat_support"]:
-        result.update(state="PHOTO",reason="去除倾斜后，人脸区域接近平面")
+    if not photo_coverage and spread<=c["flat_spread_mm"]:
+        result["quality_ok"]=False
+        result["reason"]="平面点过于集中，空间覆盖不足"
     elif spread < c["live_spread_mm"]:
         result["reason"]="非平面起伏不足，尚未满足照片平面条件"
     elif spatial < c["live_spatial_mm"]:

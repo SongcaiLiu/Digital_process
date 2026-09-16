@@ -51,67 +51,17 @@ def head_pitch(points: np.ndarray, intr: dict) -> float | None:
     return angles[0] if angles is not None else None
 
 
-class ActionState:
-    def __init__(self, direction: str):
-        self.direction = 1 if direction == "positive" else -1
-        self.ear_baseline = deque(maxlen=40)
-        self.pitch_baseline = deque(maxlen=40)
-        self.closed_frames = 0
-        self.blink_flash = 0
-        self.blink_count = 0
-        self.head_down_count = 0
-        self.head_up_count = 0
-        self.head_state = "NORMAL"
+from action_calibration import AutomaticActions
 
-    @property
-    def calibration_progress(self):
-        return min(1.0, len(self.pitch_baseline)/self.pitch_baseline.maxlen)
-
-    def reset_counts(self):
-        self.blink_count = 0
-        self.head_down_count = 0
-        self.head_up_count = 0
-        self.blink_flash = 0
-
+class ActionState(AutomaticActions):
     def update(self, landmarks, intr, down_threshold, up_threshold):
         if landmarks is None:
-            return "UNKNOWN", "UNKNOWN", None, None
-        ear = (eye_aspect_ratio(landmarks, LEFT_EYE)+eye_aspect_ratio(landmarks, RIGHT_EYE))/2
-        pitch = head_pitch(landmarks, intr)
-        if len(self.ear_baseline) < self.ear_baseline.maxlen:
-            self.ear_baseline.append(ear)
-        if pitch is not None and len(self.pitch_baseline) < self.pitch_baseline.maxlen:
-            self.pitch_baseline.append(pitch)
-        if len(self.ear_baseline) < self.ear_baseline.maxlen or len(self.pitch_baseline) < self.pitch_baseline.maxlen:
-            self.closed_frames = 0
-            return "CALIBRATING", "CALIBRATING", pitch, ear
-        ear_ref = float(np.median(self.ear_baseline)) if self.ear_baseline else ear
-        closed = ear < .68*ear_ref
-        if closed:
-            self.closed_frames += 1
-        else:
-            if 1 <= self.closed_frames <= 8:
-                self.blink_flash = 6
-                self.blink_count += 1
-            self.closed_frames = 0
-        eye_state = "BLINK" if self.blink_flash > 0 else ("CLOSED" if closed else "OPEN")
-        self.blink_flash = max(0, self.blink_flash-1)
-        head_state = "CALIBRATING"
-        if pitch is not None:
-            baseline = float(np.median(self.pitch_baseline))
-            delta = self.direction*((pitch-baseline+180.0) % 360.0-180.0)
-            if len(self.pitch_baseline) == self.pitch_baseline.maxlen:
-                return_threshold = min(down_threshold, up_threshold)*.45
-                if self.head_state == "NORMAL" and delta > down_threshold:
-                    self.head_state = "HEAD_DOWN"
-                    self.head_down_count += 1
-                elif self.head_state == "NORMAL" and delta < -up_threshold:
-                    self.head_state = "HEAD_UP"
-                    self.head_up_count += 1
-                elif self.head_state != "NORMAL" and abs(delta) < return_threshold:
-                    self.head_state = "NORMAL"
-                head_state = self.head_state
-        return head_state, eye_state, pitch, ear
+            return self.missing()
+        angles=head_pose_angles(landmarks,intr)
+        if angles is None:
+            return self.missing()
+        ear=(eye_aspect_ratio(landmarks,LEFT_EYE)+eye_aspect_ratio(landmarks,RIGHT_EYE))/2
+        return self.update_measurements(*angles,ear,down_threshold,up_threshold)
 
 
 def intrinsics_dict(value):
@@ -194,7 +144,7 @@ def main():
     print(f"Person backend: {person.backend}; face backend: {face.backend}")
     cv2.namedWindow("RGB-D Course Project Demo", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("RGB-D Course Project Demo", args.width*2, args.height+275)
-    print("保持正视并睁眼约2秒完成校准；Q/Esc退出，C重新校准，R计数清零，S保存截图")
+    print("自然正视、睁眼并稳定约1.2秒，系统自动校准；Q/Esc退出，C重新校准，R计数清零，S保存截图")
     try:
         while True:
             frames = align.process(pipeline.wait_for_frames(5000))
@@ -222,14 +172,14 @@ def main():
                 head, eyes, pitch, ear = action.update(
                     landmarks, intr, args.head_down_threshold, args.head_up_threshold)
             else:
-                head, eyes, pitch, ear = "UNKNOWN", "UNKNOWN", None, None
+                head, eyes, pitch, ear = action.missing()
             if person_box is not None:
                 x1,y1,x2,y2=person_box; cv2.rectangle(color,(x1,y1),(x2,y2),(255,180,0),2)
             if face_box is not None:
                 x1,y1,x2,y2=face_box; cv2.rectangle(color,(x1,y1),(x2,y2),(0,255,0) if live_text=="LIVE" else (0,0,255),2)
             distance_text = f"{person_3d['distance_m']:.2f} m" if "distance_m" in person_3d else "--"
             if action.calibration_progress < 1 and landmarks is not None:
-                hint = f"正在校准：请正视并睁眼 {action.calibration_progress:.0%}"
+                hint = action.calibration_hint
             else:
                 hint = "按键：C重新校准｜R计数清零｜S截图｜Q退出"
             live_cn = {"LIVE":"真人", "PHOTO":"照片", "UNKNOWN":"未知"}[live_text]

@@ -33,3 +33,14 @@ assert run(np.full((h,w),.25))["state"]=="UNKNOWN"
 plane=np.full((h,w),.8);plane[70:91,90:111]=0
 assert run(plane)["state"]=="PHOTO",run(plane)
 print("PASS: single-cheek visibility, coverage/range gates and flat surface with nose holes")
+
+# Distributed holes leave only 35% depth but enough independent plane evidence.
+partial=np.full((h,w),.8)
+partial[rng.random((h,w))>.35]=0
+r=run(partial)
+assert r["state"]=="PHOTO",r
+# The same sparse sampling of a curved surface cannot bypass live coverage rules.
+partial_face=z.copy();partial_face[partial==0]=0
+r=run(partial_face)
+assert r["state"]=="UNKNOWN",r
+print("PASS: sparse distributed plane accepted, sparse curved face rejected")
