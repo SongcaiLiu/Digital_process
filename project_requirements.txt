@@ -1,0 +1,5 @@
+# Install these after the basic D455 acquisition environment works.
+# The core preprocessing/training scripts still run without them.
+mediapipe>=0.10
+ultralytics>=8.3
+Pillow>=10

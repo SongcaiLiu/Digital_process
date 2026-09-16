@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.idea/
+
+# Personally collected RGB-D data and generated artifacts
+data/
+processed/
+recordings/
+demo_results/
+
+# Downloaded third-party weights and generated project models
+yolo*.pt
+models/*
+!models/.gitkeep
+
+*.bag
+*.db3
+.env
+
