@@ -28,7 +28,7 @@ def eye_aspect_ratio(points: np.ndarray, ids) -> float:
     return float(vertical / max(2*np.linalg.norm(p[0]-p[3]), 1e-6))
 
 
-def head_pitch(points: np.ndarray, intr: dict) -> float | None:
+def head_pose_angles(points: np.ndarray, intr: dict):
     if len(points) <= 291:
         return None
     image_points = points[[1, 152, 33, 263, 61, 291], :2].astype(np.float64)
@@ -42,7 +42,12 @@ def head_pitch(points: np.ndarray, intr: dict) -> float | None:
         return None
     matrix, _ = cv2.Rodrigues(rotation)
     angles = cv2.RQDecomp3x3(matrix)[0]
-    return float(angles[0])
+    return float(angles[0]), float(angles[1]), float(angles[2])
+
+
+def head_pitch(points: np.ndarray, intr: dict) -> float | None:
+    angles = head_pose_angles(points, intr)
+    return angles[0] if angles is not None else None
 
 
 class ActionState:
@@ -54,7 +59,8 @@ class ActionState:
         self.blink_flash = 0
         self.blink_count = 0
         self.head_down_count = 0
-        self.is_head_down = False
+        self.head_up_count = 0
+        self.head_state = "NORMAL"
 
     @property
     def calibration_progress(self):
@@ -63,9 +69,10 @@ class ActionState:
     def reset_counts(self):
         self.blink_count = 0
         self.head_down_count = 0
+        self.head_up_count = 0
         self.blink_flash = 0
 
-    def update(self, landmarks, intr, head_threshold):
+    def update(self, landmarks, intr, down_threshold, up_threshold):
         if landmarks is None:
             return "UNKNOWN", "UNKNOWN", None, None
         ear = (eye_aspect_ratio(landmarks, LEFT_EYE)+eye_aspect_ratio(landmarks, RIGHT_EYE))/2
@@ -91,14 +98,18 @@ class ActionState:
         head_state = "CALIBRATING"
         if pitch is not None:
             baseline = float(np.median(self.pitch_baseline))
-            delta = self.direction*(pitch-baseline)
+            delta = self.direction*((pitch-baseline+180.0) % 360.0-180.0)
             if len(self.pitch_baseline) == self.pitch_baseline.maxlen:
-                if not self.is_head_down and delta > head_threshold:
-                    self.is_head_down = True
+                return_threshold = min(down_threshold, up_threshold)*.45
+                if self.head_state == "NORMAL" and delta > down_threshold:
+                    self.head_state = "HEAD_DOWN"
                     self.head_down_count += 1
-                elif self.is_head_down and delta < head_threshold*.65:
-                    self.is_head_down = False
-                head_state = "HEAD_DOWN" if self.is_head_down else "NORMAL"
+                elif self.head_state == "NORMAL" and delta < -up_threshold:
+                    self.head_state = "HEAD_UP"
+                    self.head_up_count += 1
+                elif self.head_state != "NORMAL" and abs(delta) < return_threshold:
+                    self.head_state = "NORMAL"
+                head_state = self.head_state
         return head_state, eye_state, pitch, ear
 
 
@@ -130,22 +141,23 @@ def build_dashboard(color, depth_color, values):
     color = draw_texts(color, [("RGB彩色图与检测框", (12, h-34), (255,255,255), 20, False)])
     depth_color = draw_texts(depth_color, [("对齐到RGB的深度图", (12, h-34), (255,255,255), 20, False)])
     video = np.hstack((color, depth_color))
-    panel_h = 250
+    panel_h = 275
     panel = np.full((panel_h, video.shape[1], 3), 24, dtype=np.uint8)
-    live_color = (30, 220, 30) if values["live"] == "LIVE" else ((0, 70, 255) if values["live"] == "NON_LIVE" else (0, 210, 255))
+    live_color = (30, 220, 30) if values["live"] == "LIVE" else ((0, 70, 255) if values["live"] == "PHOTO" else (0, 210, 255))
     mid = video.shape[1]//2
     panel = draw_texts(panel, [
-        ("RGB-D 人体检测与动作识别", (20, 10), (255,210,80), 28, True),
-        (f"画面人数：{values['people']}    人体三维：{values['person3d_cn']}", (20, 55), (220,220,220), 22, False),
-        (f"真人判别：{values['live_cn']}", (20, 92), live_color, 31, True),
-        (f"目标距离：{values['distance']}", (20, 140), (220,220,220), 22, False),
-        (f"当前帧模型距离：{values['raw_score']}    阈值：{values['threshold']}", (20, 177), (210,210,210), 19, False),
-        (f"人脸深度有效率：{values['depth_valid']}", (20, 211), (210,210,210), 19, False),
-        (f"眨眼次数：{values['blinks']}", (mid+20, 48), (80,255,170), 29, True),
-        (f"低头次数：{values['head_count']}", (mid+20, 91), (80,255,170), 29, True),
-        (f"当前动作：眼睛={values['eyes_cn']}  头部={values['head_cn']}", (mid+20, 137), (230,230,230), 20, False),
-        (f"诊断原因：{values['reason']}", (mid+20, 174), (80,190,255), 19, False),
-        (values["hint"], (mid+20, 213), (170,170,170), 16, False),
+        ("RGB-D 人体检测与动作识别", (20, 8), (255,210,80), 28, True),
+        (f"YOLO人体检测：{values['yolo_status']}", (20, 48), (220,220,220), 19, False),
+        (f"MediaPipe人脸检测：{values['mp_status']}", (20, 80), (220,220,220), 19, False),
+        (f"RGB-D深度特征：{values['feature_status']}", (20, 112), (220,220,220), 19, False),
+        (f"分类结果：{values['live_cn']}", (20, 148), live_color, 31, True),
+        (f"人体三维：{values['person3d_cn']}    距离：{values['distance']}", (20, 196), (220,220,220), 19, False),
+        (f"模型距离：{values['raw_score']}    阈值：{values['threshold']}", (20, 229), (210,210,210), 18, False),
+        (f"眨眼次数：{values['blinks']}", (mid+20, 45), (80,255,170), 27, True),
+        (f"低头次数：{values['head_down_count']}    抬头次数：{values['head_up_count']}", (mid+20, 84), (80,255,170), 25, True),
+        (f"当前动作：眼睛={values['eyes_cn']}  头部={values['head_cn']}", (mid+20, 126), (230,230,230), 19, False),
+        (f"诊断原因：{values['reason']}", (mid+20, 166), (80,190,255), 18, False),
+        (values["hint"], (mid+20, 237), (170,170,170), 16, False),
     ])
     return np.vstack((video, panel))
 
@@ -156,7 +168,8 @@ def main():
     p.add_argument("--person-model", default="yolo11n.pt")
     p.add_argument("--width", type=int, default=640); p.add_argument("--height", type=int, default=480)
     p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--head-down-threshold", type=float, default=15.0)
+    p.add_argument("--head-down-threshold", type=float, default=10.0)
+    p.add_argument("--head-up-threshold", type=float, default=10.0)
     p.add_argument("--head-down-direction", choices=["positive", "negative"], default="positive")
     p.add_argument("--allow-fallback", action="store_true", help="缺少YOLO/MediaPipe时仍以降级模式运行")
     p.add_argument("--snapshots", type=Path, default=Path("demo_results"))
@@ -180,7 +193,7 @@ def main():
     intr = intrinsics_dict(profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics())
     print(f"Person backend: {person.backend}; face backend: {face.backend}")
     cv2.namedWindow("RGB-D Course Project Demo", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("RGB-D Course Project Demo", args.width*2, args.height+250)
+    cv2.resizeWindow("RGB-D Course Project Demo", args.width*2, args.height+275)
     print("保持正视并睁眼约2秒完成校准；Q/Esc退出，C重新校准，R计数清零，S保存截图")
     try:
         while True:
@@ -192,6 +205,7 @@ def main():
             person_3d = {"state": "UNKNOWN"}
             live_text = "UNKNOWN"; ratio = None; raw_distance = None
             face_valid_ratio = None; debug_reason = "未检测到人体"
+            feature_status = "未运行"
             face_box = None; landmarks = None; face_source = "not-found"
             if person_box is not None:
                 person_3d = measure_person_3d(depth, person_box, scale, intr)
@@ -200,6 +214,7 @@ def main():
                 if face_box is not None:
                     features, quality = extract_depth_features(depth, face_box, scale, intr)
                     face_valid_ratio = quality.get("valid_ratio")
+                    feature_status = "成功" if features is not None and quality.get("valid_ratio", 0) >= .20 else "失败"
                     reason_map = {
                         "empty_roi": "人脸裁剪区域为空",
                         "too_few_depth_points": "人脸有效深度点不足",
@@ -211,10 +226,10 @@ def main():
                         raw_distance = float(model.distances(features)[0]); ratio = raw_distance/model.threshold
                         frame_live = raw_distance <= model.threshold
                         decisions.append(frame_live)
-                        live_text = "LIVE" if sum(decisions) >= max(1, len(decisions)*.6) else "NON_LIVE"
+                        live_text = "LIVE" if sum(decisions) >= max(1, len(decisions)*.6) else "PHOTO"
                         debug_reason = "真人模型接受当前人脸" if frame_live else "真人模型距离超过阈值"
                         if person.backend != "full-frame-fallback" and person_3d["state"] == "FLAT":
-                            live_text = "NON_LIVE"
+                            live_text = "PHOTO"
                             debug_reason = "人体区域点云接近平面"
                     else:
                         decisions.clear()
@@ -222,10 +237,11 @@ def main():
                     decisions.clear()
             else:
                 decisions.clear()
-            if live_text == "LIVE":
-                head, eyes, pitch, ear = action.update(landmarks, intr, args.head_down_threshold)
+            if landmarks is not None:
+                head, eyes, pitch, ear = action.update(
+                    landmarks, intr, args.head_down_threshold, args.head_up_threshold)
             else:
-                head, eyes, pitch, ear = "LOCKED", "LOCKED", None, None
+                head, eyes, pitch, ear = "UNKNOWN", "UNKNOWN", None, None
             if person_box is not None:
                 x1,y1,x2,y2=person_box; cv2.rectangle(color,(x1,y1),(x2,y2),(255,180,0),2)
             if face_box is not None:
@@ -235,14 +251,19 @@ def main():
                 hint = f"正在校准：请正视并睁眼 {action.calibration_progress:.0%}"
             else:
                 hint = "按键：C重新校准｜R计数清零｜S截图｜Q退出"
-            live_cn = {"LIVE":"真人", "NON_LIVE":"非真人", "UNKNOWN":"无法判断"}[live_text]
+            live_cn = {"LIVE":"真人", "PHOTO":"照片", "UNKNOWN":"未知"}[live_text]
+            yolo_status = "已检测" if person_box is not None else "未检测"
+            mp_status = "已检测" if landmarks is not None else "未检测"
             person3d_cn = {"3D_OK":"三维结构正常", "FLAT":"接近平面", "UNKNOWN":"无法判断"}.get(person_3d["state"], person_3d["state"])
             eyes_cn = {"OPEN":"睁眼", "CLOSED":"闭眼", "BLINK":"眨眼", "CALIBRATING":"校准中", "LOCKED":"未启用", "UNKNOWN":"无法判断"}.get(eyes, eyes)
-            head_cn = {"NORMAL":"正常", "HEAD_DOWN":"低头", "CALIBRATING":"校准中", "LOCKED":"未启用", "UNKNOWN":"无法判断"}.get(head, head)
+            head_cn = {"NORMAL":"正常", "HEAD_DOWN":"低头", "HEAD_UP":"抬头", "CALIBRATING":"校准中", "UNKNOWN":"未知"}.get(head, head)
             dashboard = build_dashboard(color, depth_preview(depth, scale, .3, 2.5), {
-                "people": person.last_count, "person3d_cn": person3d_cn, "live": live_text, "live_cn": live_cn,
+                "people": person.last_count, "yolo_status": yolo_status,
+                "mp_status": mp_status, "feature_status": feature_status,
+                "person3d_cn": person3d_cn, "live": live_text, "live_cn": live_cn,
                 "distance": distance_text, "blinks": action.blink_count,
-                "head_count": action.head_down_count, "eyes_cn": eyes_cn, "head_cn": head_cn,
+                "head_down_count": action.head_down_count, "head_up_count": action.head_up_count,
+                "eyes_cn": eyes_cn, "head_cn": head_cn,
                 "raw_score": "--" if raw_distance is None else f"{raw_distance:.2f}",
                 "threshold": f"{model.threshold:.2f}",
                 "depth_valid": "--" if face_valid_ratio is None else f"{face_valid_ratio:.1%}",
