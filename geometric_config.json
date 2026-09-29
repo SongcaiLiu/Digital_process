@@ -2,7 +2,7 @@
   "min_valid_ratio": 0.6,
   "min_points": 350,
   "min_face_width": 70,
-  "near_m": 0.4,
+  "near_m": 0.35,
   "far_m": 1.5,
   "plane_tolerance_mm": 3.0,
   "flat_spread_mm": 6.0,
@@ -20,5 +20,7 @@
   "photo_min_cells": 20,
   "photo_min_span": 0.65,
   "photo_near_m": 0.2,
-  "photo_far_m": 3.0
+  "photo_far_m": 3.0,
+  "strong_curve_gain": 0.55,
+  "strong_curve_max_support": 0.65
 }

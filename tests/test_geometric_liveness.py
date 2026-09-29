@@ -59,3 +59,21 @@ for distance in (.3,2.):
     r=run(curve)
     assert r["state"]!="LIVE",r
 print("PASS: extended plane range, separate near/far diagnostics, unchanged live range")
+
+# A slightly turned face can yield a numeric but unreliable nose/cheek value.
+saved=lm.copy()
+lm[[1,4,5],:2]=(55,80)
+coherent=.8+.055*((x-100)/80)**2+.035*((y-80)/65)**2
+r=run(coherent)
+assert r["state"]=="LIVE",r
+assert "整体连续曲面" in r["reason"],r
+# Plane classification remains first, even with misplaced nose landmarks.
+for ax,ay in [(.4,0),(0,.4),(.4,.4),(-.4,.3)]:
+    plane=.8/(1+ax*(x-100)/220+ay*(y-80)/220)
+    r=run(plane)
+    assert r["state"]=="PHOTO",r
+# Random depth noise must not pass the strong-curve route.
+noisy=.8+rng.normal(0,.012,(h,w))
+assert run(noisy)["state"]=="UNKNOWN",run(noisy)
+lm[:]=saved
+print("PASS: strong coherent curve tolerates unstable nose while planes/noise remain rejected")

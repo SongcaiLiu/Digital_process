@@ -5,13 +5,14 @@ import cv2
 import numpy as np
 
 DEFAULTS = dict(min_valid_ratio=.60, min_points=350, min_face_width=70,
-                near_m=.40, far_m=1.50, plane_tolerance_mm=3.,
+                near_m=.35, far_m=1.50, plane_tolerance_mm=3.,
                 flat_spread_mm=6., flat_support=.85,
                 live_spread_mm=10., live_spatial_mm=3.,
                 nose_min_mm=5., nose_max_mm=55., max_noise_mm=4.,
                 min_cells=24, curve_gain_min=.35, curve_spread_max_mm=70.,
                 photo_valid_ratio=.25, photo_min_points=250, photo_min_cells=20,
-                photo_min_span=.65, photo_near_m=.20, photo_far_m=3.0)
+                photo_min_span=.65, photo_near_m=.20, photo_far_m=3.0,
+                strong_curve_gain=.55, strong_curve_max_support=.65)
 OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,
         379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,
         127,162,21,54,103,67,109]
@@ -170,6 +171,11 @@ def analyze_geometry(depth, scale, intr, mask, landmarks, config=None):
     elif protrusion is not None and c["nose_min_mm"] <= protrusion <= c["nose_max_mm"]:
         result.update(state="LIVE",reason="连续曲面及鼻部凸出（%s）" %
                       ("双颊可用" if len(cheeks)==2 else "单侧脸颊可用"))
+    elif (curve_gain >= c["strong_curve_gain"]
+          and support <= c["strong_curve_max_support"]
+          and spread <= c["curve_spread_max_mm"]):
+        result.update(state="LIVE",
+                      reason="鼻颊证据不稳定，整体连续曲面提供强证据")
     elif (protrusion is None and curve_gain>=c["curve_gain_min"]
           and spread<=c["curve_spread_max_mm"]):
         result.update(state="LIVE",reason="局部关键深度缺失，连续曲面拟合提供辅助证据")

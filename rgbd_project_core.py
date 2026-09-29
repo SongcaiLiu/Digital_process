@@ -57,8 +57,8 @@ class FaceLocator:
                     base_options=mp.tasks.BaseOptions(model_asset_path=str(Path(model_path).resolve())),
                     running_mode=mp.tasks.vision.RunningMode.IMAGE,
                     num_faces=1,
-                    min_face_detection_confidence=.5,
-                    min_face_presence_confidence=.5,
+                    min_face_detection_confidence=.35,
+                    min_face_presence_confidence=.35,
                     min_tracking_confidence=.5,
                 )
                 self.mesh = mp.tasks.vision.FaceLandmarker.create_from_options(options)
@@ -67,27 +67,44 @@ class FaceLocator:
         except Exception:
             self.mesh = None
 
+    def _detect(self, crop: np.ndarray):
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        if self.tasks_api:
+            mp_image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB,
+                                     data=np.ascontiguousarray(rgb))
+            result = self.mesh.detect(mp_image)
+            return result.face_landmarks[0] if result.face_landmarks else None
+        result = self.mesh.process(rgb)
+        return result.multi_face_landmarks[0].landmark if result.multi_face_landmarks else None
+
     def locate(self, bgr: np.ndarray, person_box: tuple[int, int, int, int] | None = None):
         h, w = bgr.shape[:2]
         landmarks = None
         if self.mesh is not None:
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            if self.tasks_api:
-                mp_image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
-                result = self.mesh.detect(mp_image)
-                lm = result.face_landmarks[0] if result.face_landmarks else None
+            if person_box is None:
+                x1, y1, x2, y2 = 0, 0, w, h
             else:
-                result = self.mesh.process(rgb)
-                lm = result.multi_face_landmarks[0].landmark if result.multi_face_landmarks else None
+                px1, py1, px2, py2 = person_box
+                mx, my = .04*(px2-px1), .03*(py2-py1)
+                x1, y1, x2, y2 = clamp_box((px1-mx, py1-my, px2+mx, py2+my), bgr.shape)
+            crop = bgr[y1:y2, x1:x2]
+            lm = self._detect(crop)
+            mirrored = False
+            if not lm and crop.size:
+                lm = self._detect(cv2.flip(crop, 1))
+                mirrored = bool(lm)
             if lm:
-                xs = np.array([p.x * w for p in lm])
-                ys = np.array([p.y * h for p in lm])
-                margin_x = .12 * (xs.max() - xs.min())
-                margin_y = .10 * (ys.max() - ys.min())
+                cw, ch = x2-x1, y2-y1
+                xs = np.array([x1+(1-p.x)*cw if mirrored else x1+p.x*cw for p in lm])
+                ys = np.array([y1+p.y*ch for p in lm])
+                margin_x = .12*(xs.max()-xs.min())
+                margin_y = .10*(ys.max()-ys.min())
                 box = clamp_box((xs.min()-margin_x, ys.min()-margin_y,
                                  xs.max()+margin_x, ys.max()+margin_y), bgr.shape)
-                landmarks = np.array([(p.x*w, p.y*h, p.z*w) for p in lm], dtype=np.float32)
-                return box, landmarks, self.backend
+                zsign = -1 if mirrored else 1
+                landmarks = np.array([(xs[i], ys[i], zsign*p.z*cw)
+                                      for i, p in enumerate(lm)], dtype=np.float32)
+                return box, landmarks, self.backend+("-mirror" if mirrored else "-person-roi")
         if self.allow_fallback:
             return central_face_box(bgr.shape, person_box), landmarks, "center-fallback"
         return None, None, "not-found"
@@ -109,9 +126,11 @@ class PersonLocator:
             config_dir = Path("models/ultralytics_config").resolve()
             config_dir.mkdir(parents=True, exist_ok=True)
             os.environ.setdefault("YOLO_CONFIG_DIR", str(config_dir))
+            import torch  # type: ignore
             from ultralytics import YOLO  # type: ignore
+            self.device = 0 if torch.cuda.is_available() else "cpu"
             self.model = YOLO(model_path)
-            self.backend = f"ultralytics:{model_path}"
+            self.backend = f"ultralytics:{model_path}:{'cuda' if self.device == 0 else 'cpu'}"
         except Exception as exc:
             self.error = str(exc)
 
@@ -120,7 +139,8 @@ class PersonLocator:
         if self.model is None:
             self.last_count = 1
             return (0, 0, w, h), .0, self.backend
-        result = self.model.predict(bgr, classes=[0], conf=self.confidence, verbose=False)[0]
+        result = self.model.predict(bgr, classes=[0], conf=self.confidence, verbose=False,
+                                    device=self.device)[0]
         candidates = []
         if result.boxes is not None:
             for xyxy, conf in zip(result.boxes.xyxy.cpu().numpy(), result.boxes.conf.cpu().numpy()):
@@ -143,6 +163,7 @@ class PersonLocator:
         self.last_count = len(candidates)
         _, box, conf = max(candidates, key=lambda item: item[0])
         return box, conf, self.backend
+
 
 
 def measure_person_3d(depth_raw: np.ndarray, box: tuple[int, int, int, int], depth_scale: float, intrinsics: dict) -> dict:
